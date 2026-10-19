@@ -1,0 +1,846 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Dosa Dash 2D — Kitchen Escape</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #1a0f08;
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
+    font-family: sans-serif;
+    touch-action: none;
+    user-select: none;
+  }
+  canvas {
+    display: block;
+    image-rendering: pixelated;
+    cursor: pointer;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+// =====================================================================
+// DOSA DASH 2D  —  Kitchen Escape  (JavaScript port)
+// =====================================================================
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+// ── Logical resolution ──────────────────────────────────────────────
+const LW = 1280, LH = 720;
+let scale = 1, offX = 0, offY = 0;
+
+function resize() {
+  const sw = window.innerWidth, sh = window.innerHeight;
+  scale = Math.min(sw / LW, sh / LH);
+  canvas.width  = Math.round(LW * scale);
+  canvas.height = Math.round(LH * scale);
+  offX = (sw - canvas.width)  / 2;
+  offY = (sh - canvas.height) / 2;
+  canvas.style.position = 'absolute';
+  canvas.style.left = offX + 'px';
+  canvas.style.top  = offY + 'px';
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ── Constants ────────────────────────────────────────────────────────
+const COUNTER_BACK_Y  = 548;
+const GROUND_Y        = 596;
+const COUNTER_FRONT_Y = 612;
+const DOSA_X          = 330;
+
+const GRAVITY       = 2700;
+const JUMP_V        = 1100;
+const COYOTE_TIME   = 0.08;
+const JUMP_BUFFER_T = 0.12;
+
+const BASE_SPEED    = 360;
+const MAX_SPEED     = 740;
+const SPEED_PER_M   = 2.4;
+
+const IMMUNITY_TIME = 4.0;
+const IMMUNITY_MAX  = 8.0;
+const CHUTNEY_CHANCE = 0.25;
+
+const DOSA_HEIGHT    = 112;
+const CHUTNEY_HEIGHT = 58;
+
+const WALL_PERIOD   = 1536;
+const WALL_PARALLAX = 0.3;
+
+// Intro / death timelines
+const INTRO_SCARE_AT = 0.9;
+const INTRO_RUN_AT   = 1.6;
+const INTRO_SLAM_AT  = 1.85;
+const INTRO_END      = 2.7;
+const DEATH_END      = 2.1;
+
+const HAND_START  = [-220, -320];
+const HAND_HOVER  = [DOSA_X - 120, GROUND_Y - 250];
+const HAND_SLAM   = [DOSA_X - 170, GROUND_Y - 6];
+const HAND_EXIT   = [-320, -360];
+const HAND_ANCHOR = [95, 385];
+
+// Colors
+const SKIN   = [240,190,150], SKIN_D   = [190,130,95];
+const SLEEVE = [70,110,170],  SLEEVE_D = [45,75,125];
+const SAGE   = [108,156,132], SAGE_D   = [70,112,92];
+
+// ── Helpers ─────────────────────────────────────────────────────────
+const clamp  = (v,lo,hi) => Math.max(lo, Math.min(hi, v));
+const lerp   = (a,b,t)   => a + (b-a)*t;
+const easeOut   = t => { t=clamp(t,0,1); return 1-(1-t)**3; };
+const easeIn    = t => { t=clamp(t,0,1); return t**3; };
+const easeInOut = t => { t=clamp(t,0,1); return t*t*(3-2*t); };
+const rng = (lo, hi) => lo + Math.random()*(hi-lo);
+const rgb = ([r,g,b], a=1) => a<1 ? `rgba(${r},${g},${b},${a})` : `rgb(${r},${g},${b})`;
+
+function roundRect(ctx, color, x, y, w, h, r=12, outline=null, lw=3) {
+  ctx.beginPath();
+  ctx.roundRect(x, y, w, h, r);
+  if (outline) {
+    ctx.fillStyle = rgb(outline); ctx.fill();
+    ctx.beginPath();
+    ctx.roundRect(x+lw, y+lw, w-lw*2, h-lw*2, Math.max(0,r-lw));
+  }
+  ctx.fillStyle = typeof color === 'string' ? color : rgb(color);
+  ctx.fill();
+}
+
+function drawText(ctx, text, size, color, cx, cy, anchor='center', shadow=[30,20,10]) {
+  ctx.font = `bold ${size}px "Arial Rounded MT Bold", "Arial Black", Verdana, Arial, sans-serif`;
+  ctx.textAlign = anchor === 'center' ? 'center' : anchor === 'topleft' ? 'left' : 'center';
+  ctx.textBaseline = anchor === 'topleft' ? 'top' : 'middle';
+  if (shadow) {
+    ctx.fillStyle = rgb(shadow);
+    ctx.fillText(text, cx+3, cy+3);
+  }
+  ctx.fillStyle = typeof color === 'string' ? color : rgb(color);
+  ctx.fillText(text, cx, cy);
+}
+
+function drawPanel(ctx, x, y, w, h, color=[20,28,26], alpha=0.67, radius=18, outline=null) {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = rgb(color);
+  ctx.beginPath(); ctx.roundRect(x,y,w,h,radius); ctx.fill();
+  if (outline) {
+    ctx.strokeStyle = rgb(outline); ctx.lineWidth=3;
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// ── High-score (localStorage) ───────────────────────────────────────
+function loadBest() {
+  try { return parseInt(localStorage.getItem('dosadash_best')||'0')||0; } catch { return 0; }
+}
+function saveBest(v) {
+  try { localStorage.setItem('dosadash_best', String(Math.floor(v))); } catch {}
+}
+
+// ── Pre-render background wall ───────────────────────────────────────
+function buildWallCanvas() {
+  const c = document.createElement('canvas');
+  c.width = WALL_PERIOD; c.height = COUNTER_BACK_Y;
+  const g = c.getContext('2d');
+
+  // Wall base
+  g.fillStyle = 'rgb(240,214,184)'; g.fillRect(0,0,WALL_PERIOD,COUNTER_BACK_Y);
+
+  // Tiled backsplash
+  const top = 240;
+  g.fillStyle = 'rgb(219,196,166)'; g.fillRect(0,top,WALL_PERIOD,COUNTER_BACK_Y-top);
+  const tw=96, th=48;
+  const rows = Math.ceil((COUNTER_BACK_Y-top)/th)+1;
+  for(let r=0;r<rows;r++) {
+    const off = r%2===0 ? 0 : tw/2;
+    for(let col=-1; col<WALL_PERIOD/tw+1; col++) {
+      const rx=col*tw+off+2, ry=top+r*th+2, rw=tw-4, rh=th-4;
+      g.fillStyle='rgb(250,238,220)'; g.beginPath(); g.roundRect(rx,ry,rw,rh,6); g.fill();
+      g.strokeStyle='rgb(255,249,238)'; g.lineWidth=2;
+      g.beginPath(); g.moveTo(rx+6,ry+3); g.lineTo(rx+rw-6,ry+3); g.stroke();
+    }
+  }
+  g.fillStyle='rgb(196,160,128)'; g.fillRect(0,top-12,WALL_PERIOD,12);
+
+  // Cabinets
+  for(let i=0;i<WALL_PERIOD/192;i++) {
+    if(i===2||i===5) continue;
+    const x0=i*192;
+    roundRect(g,rgb(SAGE),x0+6,24,180,196,8,rgb(SAGE_D),4);
+    roundRect(g,rgb([132,178,152]),x0+20,40,152,164,6,rgb([80,126,104]),3);
+    g.fillStyle='rgb(232,186,98)';
+    g.beginPath(); g.arc(x0+156,188,7,0,Math.PI*2); g.fill();
+  }
+
+  // Window (slot 2)
+  const wx=2*192;
+  roundRect(g,rgb([250,246,238]),wx+20,36,152,176,8,rgb([190,175,150]),4);
+  g.fillStyle='rgb(176,214,236)'; g.fillRect(wx+34,50,124,148);
+  g.fillStyle='rgba(255,255,255,0.7)';
+  g.beginPath(); g.ellipse(wx+74,83,30,13,0,0,Math.PI*2); g.fill();
+  g.beginPath(); g.ellipse(wx+108,95,28,11,0,0,Math.PI*2); g.fill();
+  g.strokeStyle='rgb(250,246,238)'; g.lineWidth=6;
+  g.beginPath(); g.moveTo(wx+96,50); g.lineTo(wx+96,198); g.stroke();
+  g.beginPath(); g.moveTo(wx+34,124); g.lineTo(wx+158,124); g.stroke();
+
+  // Fridge (slot 5)
+  const fx=5*192;
+  roundRect(g,rgb([190,210,214]),fx+8,40,176,COUNTER_BACK_Y,14,rgb([130,150,156]),4);
+  g.strokeStyle='rgb(130,150,156)'; g.lineWidth=4;
+  g.beginPath(); g.moveTo(fx+12,190); g.lineTo(fx+180,190); g.stroke();
+  roundRect(g,rgb([110,130,136]),fx+156,70,10,90,5);
+  roundRect(g,rgb([110,130,136]),fx+156,210,10,130,5);
+  [[fx+40,240,'rgb(230,90,70)'],[fx+80,260,'rgb(250,210,90)'],[fx+50,290,'rgb(90,160,210)']].forEach(([bx,by,col])=>{
+    g.fillStyle=col; g.beginPath(); g.roundRect(bx,by,26,26,4); g.fill();
+  });
+
+  // Pendant lamps
+  [180,800].forEach(lx=>{
+    g.strokeStyle='rgb(60,52,46)'; g.lineWidth=4;
+    g.beginPath(); g.moveTo(lx,0); g.lineTo(lx,72); g.stroke();
+    g.fillStyle='rgb(190,130,50)';
+    g.beginPath(); g.moveTo(lx-32,72); g.lineTo(lx+32,72); g.lineTo(lx+52,116); g.lineTo(lx-52,116); g.closePath(); g.fill();
+    g.fillStyle='rgb(255,196,102)';
+    g.beginPath(); g.moveTo(lx-28,75); g.lineTo(lx+28,75); g.lineTo(lx+46,112); g.lineTo(lx-46,112); g.closePath(); g.fill();
+    g.fillStyle='rgba(255,242,190,0.9)';
+    g.beginPath(); g.ellipse(lx,115,26,7,0,0,Math.PI*2); g.fill();
+  });
+
+  // Plant
+  g.fillStyle='rgb(60,130,80)';
+  g.beginPath(); g.moveTo(80,470); g.lineTo(40,410); g.lineTo(70,440); g.lineTo(80,395); g.lineTo(95,440); g.lineTo(125,405); g.lineTo(110,470); g.closePath(); g.fill();
+  g.fillStyle='rgb(80,160,95)';
+  g.beginPath(); g.ellipse(95,450,45,30,0,0,Math.PI*2); g.fill();
+  roundRect(g,rgb([214,108,72]),50,488,80,60,10,rgb([150,70,45]),3);
+
+  // Utensil stand (whisk)
+  roundRect(g,rgb([180,190,190]),690,484,52,64,8,rgb([110,120,120]),3);
+  for(let k=0;k<4;k++){
+    g.strokeStyle='rgb(210,214,214)'; g.lineWidth=4;
+    g.beginPath(); g.moveTo(700+k*11,484); g.lineTo(694+k*15,436); g.stroke();
+    g.fillStyle='rgb(200,205,205)';
+    g.beginPath(); g.arc(694+k*15,434,8,0,Math.PI*2); g.fill();
+  }
+  return c;
+}
+
+// ── Pre-render obstacle shapes ───────────────────────────────────────
+function buildObstacles() {
+  function make(w,h,fn) {
+    const c=document.createElement('canvas'); c.width=w; c.height=h;
+    const g=c.getContext('2d'); fn(g); return c;
+  }
+
+  const pot = make(130,100,g=>{
+    const steel=[170,182,188], dark=[96,108,116];
+    roundRect(g,rgb(steel),16,14,98,86,10,rgb(dark));
+    roundRect(g,rgb([205,214,218]),10,6,110,18,8,rgb(dark));
+    roundRect(g,rgb([140,152,160]),0,34,18,14,6,rgb(dark));
+    roundRect(g,rgb([140,152,160]),112,34,18,14,6,rgb(dark));
+    g.fillStyle='rgb(232,240,242)'; g.beginPath(); g.roundRect(28,32,10,52,5); g.fill();
+  });
+
+  const plates = make(124,58,g=>{
+    for(let i=0;i<4;i++){
+      const y=40-12*i, rim=i%2?'rgb(120,170,210)':'rgb(236,240,236)';
+      g.fillStyle='rgb(130,150,160)'; g.beginPath(); g.ellipse(62,y+9,58,9,0,0,Math.PI*2); g.fill();
+      g.fillStyle=rim; g.beginPath(); g.ellipse(62,y+8.5,56,7.5,0,0,Math.PI*2); g.fill();
+    }
+    g.fillStyle='rgb(250,250,244)'; g.beginPath(); g.ellipse(62,11,36,5,0,0,Math.PI*2); g.fill();
+  });
+
+  const jars = make(96,92,g=>{
+    [[4,[222,140,70],[80,130,100]],[50,[190,70,60],[240,200,100]]].forEach(([x,col,lid])=>{
+      roundRect(g,rgb(col),x,24,42,66,10,rgb([90,55,35]));
+      roundRect(g,rgb(lid),x+3,8,36,20,6,rgb([70,60,40]));
+      g.fillStyle='rgb(250,240,220)'; g.beginPath(); g.roundRect(x+8,44,26,22,4); g.fill();
+    });
+  });
+
+  const kettle = make(132,118,g=>{
+    const steel=[178,190,196], dark=[96,108,116];
+    g.fillStyle=rgb(dark);
+    g.beginPath(); g.moveTo(98,66); g.lineTo(126,36); g.lineTo(132,46); g.lineTo(108,90); g.closePath(); g.fill();
+    g.strokeStyle=rgb(dark); g.lineWidth=8;
+    g.beginPath(); g.arc(29,75,29,Math.PI/2,3*Math.PI/2); g.stroke();
+    g.fillStyle=rgb(dark); g.beginPath(); g.ellipse(60,75,48,41,0,0,Math.PI*2); g.fill();
+    g.fillStyle=rgb(steel); g.beginPath(); g.ellipse(60,75,44,37,0,0,Math.PI*2); g.fill();
+    roundRect(g,rgb([140,152,160]),38,22,44,16,7,rgb(dark));
+    g.fillStyle=rgb(dark); g.beginPath(); g.arc(60,18,7,0,Math.PI*2); g.fill();
+    g.fillStyle='rgb(236,244,246)'; g.beginPath(); g.ellipse(37,68,9,18,0,0,Math.PI*2); g.fill();
+  });
+
+  const tomato = make(70,66,g=>{
+    g.fillStyle='rgb(140,28,24)'; g.beginPath(); g.ellipse(35,38,31,28,0,0,Math.PI*2); g.fill();
+    g.fillStyle='rgb(218,58,44)'; g.beginPath(); g.ellipse(35,38,28,25,0,0,Math.PI*2); g.fill();
+    g.fillStyle='rgb(250,140,120)'; g.beginPath(); g.ellipse(23,25,7,5,0,0,Math.PI*2); g.fill();
+    g.fillStyle='rgb(50,130,60)';
+    g.beginPath(); g.moveTo(35,8); g.lineTo(26,0); g.lineTo(32,12); g.lineTo(20,12); g.lineTo(31,17);
+    g.lineTo(35,26); g.lineTo(39,17); g.lineTo(50,12); g.lineTo(38,12); g.lineTo(44,0); g.closePath(); g.fill();
+  });
+
+  const pin = make(150,34,g=>{
+    const wood=[214,164,98], dark=[140,94,50];
+    roundRect(g,rgb(wood),22,4,106,26,10,rgb(dark));
+    roundRect(g,rgb([190,140,80]),0,10,28,14,6,rgb(dark));
+    roundRect(g,rgb([190,140,80]),122,10,28,14,6,rgb(dark));
+  });
+
+  return {
+    plate: { canvas: plates, hit: {x:8,y:6,w:108,h:52} },
+    veg:   { canvas: tomato, hit: {x:8,y:10,w:54,h:56} },
+    pot:   { canvas: pot,    hit: {x:14,y:8,w:102,h:92} },
+    jar:   { canvas: jars,   hit: {x:4,y:8,w:88,h:84} },
+    kettle:{ canvas: kettle, hit: {x:14,y:16,w:92,h:102} },
+    pin:   { canvas: pin,    hit: {x:6,y:4,w:138,h:30} },
+  };
+}
+
+// Obstacle colors for smash particles
+const OBS_COLORS = {
+  plate:'rgb(236,240,236)', veg:'rgb(218,58,44)', pot:'rgb(170,182,188)',
+  jar:'rgb(222,140,70)', kettle:'rgb(178,190,196)', pin:'rgb(214,164,98)',
+};
+const OBS_KINDS = ['plate','veg','pot','jar','kettle','pin'];
+
+// ── Pre-render dosa fallback ─────────────────────────────────────────
+function buildDosa(h) {
+  const w=Math.round(h*1.2);
+  const c=document.createElement('canvas'); c.width=w; c.height=h;
+  const g=c.getContext('2d');
+  // body
+  g.fillStyle='rgb(120,70,25)'; g.beginPath(); g.ellipse(w/2,h*0.55,w/2,h*0.45,0,0,Math.PI*2); g.fill();
+  g.fillStyle='rgb(226,156,62)'; g.beginPath(); g.ellipse(w/2,h*0.55,w/2-4,h*0.45-4,0,0,Math.PI*2); g.fill();
+  g.fillStyle='rgb(246,196,110)'; g.beginPath(); g.ellipse(w/2,h*0.55,w/2-18,h*0.45-15,0,0,Math.PI*2); g.fill();
+  // eyes
+  [0.36,0.64].forEach(ex=>{
+    g.fillStyle='white'; g.beginPath(); g.arc(w*ex,h*0.50,11,0,Math.PI*2); g.fill();
+    g.fillStyle='rgb(30,20,15)'; g.beginPath(); g.arc(w*ex+2,h*0.50,6,0,Math.PI*2); g.fill();
+  });
+  // smile
+  g.strokeStyle='rgb(110,50,30)'; g.lineWidth=4;
+  g.beginPath(); g.arc(w/2,h*0.52,w*0.12,0.1*Math.PI,0.9*Math.PI); g.stroke();
+  return c;
+}
+
+// ── Pre-render chutney fallback ──────────────────────────────────────
+function buildChutney(h) {
+  const w=Math.round(h*1.15);
+  const c=document.createElement('canvas'); c.width=w; c.height=h;
+  const g=c.getContext('2d');
+  g.fillStyle='rgb(150,120,80)'; g.beginPath(); g.ellipse(w/2,h*0.675,w/2,h*0.325,0,0,Math.PI*2); g.fill();
+  g.fillStyle='rgb(240,228,200)'; g.beginPath(); g.ellipse(w/2,h*0.67,w/2-3,h*0.29,0,0,Math.PI*2); g.fill();
+  g.fillStyle='rgb(90,170,80)'; g.beginPath(); g.ellipse(w/2,h*0.49,w*0.38,h*0.21,0,0,Math.PI*2); g.fill();
+  g.fillStyle='rgb(130,205,110)'; g.beginPath(); g.ellipse(w/2,h*0.41,w*0.15,h*0.07,0,0,Math.PI*2); g.fill();
+  return c;
+}
+
+// ── Hand builder ─────────────────────────────────────────────────────
+function buildHandFrames() {
+  const frames=[];
+  for(let i=0;i<=4;i++){
+    const curl=i/4;
+    const c=document.createElement('canvas'); c.width=190; c.height=400;
+    const g=c.getContext('2d');
+    const cx=95;
+    roundRect(g,rgb(SLEEVE),cx-70,0,140,110,14,rgb(SLEEVE_D),4);
+    roundRect(g,rgb([235,235,240]),cx-72,96,144,26,8,rgb([170,170,180]),3);
+    roundRect(g,rgb(SKIN),cx-52,120,104,100,20,rgb(SKIN_D),4);
+    [78,96,102,88].forEach((length,i)=>{
+      const fx=cx-58+i*30, ln=Math.round(length*(1-0.55*curl));
+      roundRect(g,rgb(SKIN),fx,270,28,ln+20,14,rgb(SKIN_D),3);
+    });
+    roundRect(g,rgb(SKIN),cx-86,215,32,74-Math.round(20*curl),16,rgb(SKIN_D),3);
+    roundRect(g,rgb(SKIN),cx-62,190,124,100,30,rgb(SKIN_D),4);
+    frames.push(c);
+  }
+  return frames;
+}
+
+function drawHand(ctx, frames, tipX, tipY, angle, curl) {
+  const idx=Math.round(clamp(curl,0,1)*4);
+  const img=frames[idx];
+  const rad=angle*Math.PI/180;
+  const vx=HAND_ANCHOR[0]-img.width/2;
+  const vy=HAND_ANCHOR[1]-img.height/2;
+  const rx= vx*Math.cos(rad)+vy*Math.sin(rad);
+  const ry=-vx*Math.sin(rad)+vy*Math.cos(rad);
+  ctx.save();
+  ctx.translate(tipX-rx, tipY-ry);
+  ctx.rotate(rad);
+  ctx.drawImage(img, -img.width/2, -img.height/2);
+  ctx.restore();
+}
+
+// ── Hand poses ───────────────────────────────────────────────────────
+function introHandPose(t) {
+  if(t<0||t>=INTRO_END) return null;
+  if(t<1.1) {
+    const p=easeOut(t/1.1);
+    return [lerp(HAND_START[0],HAND_HOVER[0],p), lerp(HAND_START[1],HAND_HOVER[1],p), lerp(35,16,p), 0];
+  }
+  if(t<INTRO_RUN_AT) {
+    const w=t-1.1;
+    return [HAND_HOVER[0]+Math.sin(w*14)*8, HAND_HOVER[1]+Math.sin(w*9)*6, 16, 0.5+0.5*Math.sin(w*16)];
+  }
+  if(t<INTRO_SLAM_AT) {
+    const p=easeIn((t-INTRO_RUN_AT)/(INTRO_SLAM_AT-INTRO_RUN_AT));
+    return [lerp(HAND_HOVER[0],HAND_SLAM[0],p), lerp(HAND_HOVER[1],HAND_SLAM[1],p), lerp(16,8,p), 0];
+  }
+  const p=easeIn((t-INTRO_SLAM_AT)/(INTRO_END-INTRO_SLAM_AT));
+  return [lerp(HAND_SLAM[0],HAND_EXIT[0],p), lerp(HAND_SLAM[1],HAND_EXIT[1],p), lerp(8,35,p), 0];
+}
+
+function deathHandPose(t, tx, ty) {
+  if(t<0.15||t>=DEATH_END) return null;
+  if(t<0.8) {
+    const p=easeInOut((t-0.15)/0.65);
+    return [tx, lerp(-320,ty,p), 6, 0];
+  }
+  if(t<1.05) return [tx, ty, 6, (t-0.8)/0.25];
+  const p=easeIn((t-1.05)/(DEATH_END-1.05));
+  return [lerp(tx,tx+160,p), lerp(ty,-380,p), lerp(6,28,p), 1.0];
+}
+
+// ── Crumbs (seeded) ──────────────────────────────────────────────────
+function makeCrumbs() {
+  const out=[], seed=7;
+  let s=seed;
+  function rand(){ s=(s*1664525+1013904223)&0xffffffff; return (s>>>0)/0xffffffff; }
+  for(let i=0;i<40;i++){
+    out.push([rand()*LW, COUNTER_BACK_Y+16+rand()*(COUNTER_FRONT_Y-COUNTER_BACK_Y-22), rand()<0.5?2:3]);
+  }
+  return out;
+}
+
+// ── Input ─────────────────────────────────────────────────────────────
+const keys={};
+let jumpPressed=false, jumpReleased=false;
+
+window.addEventListener('keydown', e=>{
+  if(keys[e.code]) return;
+  keys[e.code]=true;
+  if(['Space','ArrowUp','KeyW'].includes(e.code)) { jumpPressed=true; e.preventDefault(); }
+  if(e.code==='Escape') keys['_esc']=true;
+  if(e.code==='KeyP') keys['_p']=true;
+  if(e.code==='KeyR') keys['_r']=true;
+  if(['Enter','NumpadEnter'].includes(e.code)) keys['_enter']=true;
+});
+window.addEventListener('keyup', e=>{
+  keys[e.code]=false;
+  if(['Space','ArrowUp','KeyW'].includes(e.code)) jumpReleased=true;
+});
+canvas.addEventListener('pointerdown', e=>{ jumpPressed=true; e.preventDefault(); }, {passive:false});
+canvas.addEventListener('pointerup', ()=>{ jumpReleased=true; });
+
+// ── Game state ───────────────────────────────────────────────────────
+const wallCanvas = buildWallCanvas();
+const obstacleArt = buildObstacles();
+const handFrames = buildHandFrames();
+const dosaImg = buildDosa(DOSA_HEIGHT);
+const chutneyImg = buildChutney(CHUTNEY_HEIGHT);
+const crumbs = makeCrumbs();
+const chutneyIcon = (()=>{
+  const h=34, w=Math.max(1,Math.round(chutneyImg.width*h/chutneyImg.height));
+  const c=document.createElement('canvas'); c.width=w; c.height=h;
+  c.getContext('2d').drawImage(chutneyImg,0,0,w,h); return c;
+})();
+
+let state='menu';
+let best=loadBest();
+let scroll=0, curSpeed=0, h=0, vy=0, onGround=true;
+let coyote=0, jumpBuf=0;
+let runT=0, playT=0, introT=0, deathT=0, shakeT=0;
+let slamDone=false;
+let obstacles=[], chutneys=[], particles=[], floaters=[];
+let chutneyCount=0, smashed=0, shieldT=0, spawnCursor=900;
+let finalScore=0, newBest=false, running=true;
+
+function meters() { return Math.floor(scroll/100); }
+function score()  { return meters() + chutneyCount*10 + smashed*5; }
+
+function resetWorld() {
+  scroll=0; curSpeed=0; h=0; vy=0; onGround=true;
+  coyote=0; jumpBuf=0; runT=0; playT=0; introT=0; deathT=0; shakeT=0;
+  slamDone=false; spawnCursor=900; finalScore=0; newBest=false;
+  obstacles=[]; chutneys=[]; particles=[]; floaters=[];
+  chutneyCount=0; smashed=0; shieldT=0;
+}
+
+function startIntro() { resetWorld(); state='intro'; }
+function beginRun()   { state='playing'; vy=800; h=0.5; onGround=false; }
+
+function startDeath() {
+  state='dying'; deathT=0; curSpeed=0; shieldT=0;
+  finalScore=score();
+  if(finalScore>best){ best=finalScore; newBest=true; saveBest(best); }
+  shakeT=0.35;
+  const dr=dosaRect();
+  burst(dr.x+dr.w/2, dr.y+dr.h/2, [250,200,90], 16, 320);
+}
+
+// ── Particles ────────────────────────────────────────────────────────
+function makeParticle(x,y,color,speed,up=false) {
+  const ang=up?rng(Math.PI*1.1,Math.PI*1.9):rng(0,Math.PI*2);
+  const sp=rng(0.3,1.0)*speed;
+  return {x,y,vx:Math.cos(ang)*sp,vy:Math.sin(ang)*sp,life:rng(0.35,0.8),size:Math.round(rng(3,7)),color};
+}
+function burst(x,y,color,n,speed) {
+  for(let i=0;i<n;i++) particles.push(makeParticle(x,y,color,speed));
+}
+
+// ── Obstacle spawning ────────────────────────────────────────────────
+function dosaRect() {
+  const sw=dosaImg.width, sh=dosaImg.height;
+  const w=Math.round(sw*0.55), rh=Math.round(sh*0.72);
+  const cx=DOSA_X, bot=GROUND_Y-h-4;
+  return {x:cx-w/2, y:bot-rh, w, h:rh};
+}
+
+function addObstacle(kind, x) {
+  const art=obstacleArt[kind];
+  const o={kind, x:parseFloat(x), w:art.canvas.width, canvas:art.canvas,
+           hitLocal:art.hit, y:GROUND_Y-art.canvas.height};
+  o.hit=()=>({x:o.x+o.hitLocal.x, y:o.y+o.hitLocal.y, w:o.hitLocal.w, h:o.hitLocal.h});
+  obstacles.push(o);
+  return o;
+}
+
+function spawnGroup() {
+  const speed=Math.max(curSpeed,BASE_SPEED);
+  const gap=rng(0.8,1.25)*speed*0.8+260;
+  const x=spawnCursor+gap;
+  const kind=OBS_KINDS[Math.floor(Math.random()*OBS_KINDS.length)];
+  const o=addObstacle(kind,x);
+  let right=o.x+o.w;
+  if(kind==='veg'&&speed>=520&&Math.random()<0.3){
+    const o2=addObstacle('veg',right+rng(20,40)); right=o2.x+o2.w;
+  }
+  if(Math.random()<CHUTNEY_CHANCE){
+    const cy=GROUND_Y-Math.min(o.hitLocal.h+80,190);
+    chutneys.push({x:o.x+o.w/2, baseY:cy, phase:rng(0,6.28), y:cy});
+  } else if(Math.random()<0.2){
+    chutneys.push({x:(spawnCursor+x)/2, baseY:GROUND_Y-42, phase:rng(0,6.28), y:GROUND_Y-42});
+  }
+  spawnCursor=right;
+}
+
+// Rect collision
+function rectsOverlap(a,b) {
+  return a.x<b.x+b.w && a.x+a.w>b.x && a.y<b.y+b.h && a.y+a.h>b.y;
+}
+
+// ── Update ───────────────────────────────────────────────────────────
+function stepVertical(dt) {
+  if(h>0||vy>0){
+    vy-=GRAVITY*dt; h+=vy*dt;
+    if(h<=0){ h=0; vy=0;
+      if(!onGround){ for(let i=0;i<5;i++) particles.push(makeParticle(DOSA_X,GROUND_Y-2,[226,200,160],120,true)); }
+      onGround=true;
+    } else { onGround=false; }
+  } else { onGround=true; }
+}
+
+function collectChutney(c) {
+  chutneyCount++;
+  shieldT=Math.min(IMMUNITY_MAX,shieldT+IMMUNITY_TIME);
+  burst(c.x,c.y,[120,230,120],14,260);
+  floaters.push({text:'IMMUNE!',x:c.x,y:c.y-30,life:1.0,color:[150,255,160]});
+}
+
+function smashObstacle(o) {
+  obstacles.splice(obstacles.indexOf(o),1);
+  smashed++; shakeT=0.18;
+  const col=OBS_COLORS[o.kind];
+  burst(o.x+o.w/2, o.y+o.canvas.height/2, col.match(/\d+/g).map(Number), 22, 420);
+  floaters.push({text:'SMASH!',x:o.x+o.w/2,y:o.y-10,life:0.8,color:[255,230,120]});
+}
+
+let escWas=false, pWas=false, rWas=false, enterWas=false;
+
+function update(dt) {
+  // consume edge-trigger keys
+  const escNow=!!keys['_esc'], pNow=!!keys['_p'], rNow=!!keys['_r'], enterNow=!!keys['_enter'];
+  const escEdge=escNow&&!escWas, pEdge=pNow&&!pWas, rEdge=rNow&&!rWas, enterEdge=enterNow&&!enterWas;
+  escWas=escNow; pWas=pNow; rWas=rNow; enterWas=enterNow;
+
+  shakeT=Math.max(0,shakeT-dt);
+
+  // Particles
+  for(const p of particles){ p.x+=p.vx*dt; p.y+=p.vy*dt; p.vy+=900*dt; p.life-=dt; }
+  particles=particles.filter(p=>p.life>0);
+  for(const f of floaters){ f.y-=50*dt; f.life-=dt; }
+  floaters=floaters.filter(f=>f.life>0);
+
+  if(state==='menu'){
+    runT+=dt;
+    if(jumpPressed||enterEdge) startIntro();
+  } else if(state==='intro'){
+    runT+=dt; introT+=dt;
+    if(!slamDone&&introT>=INTRO_SLAM_AT){
+      slamDone=true; shakeT=0.3;
+      for(let i=0;i<14;i++) particles.push(makeParticle(HAND_SLAM[0]-scroll,GROUND_Y-4,[226,200,160],260,true));
+    }
+    if(introT>=INTRO_RUN_AT) beginRun();
+  } else if(state==='playing'){
+    runT+=dt; playT+=dt;
+    if(introT<INTRO_END){ introT+=dt;
+      if(!slamDone&&introT>=INTRO_SLAM_AT){
+        slamDone=true; shakeT=0.3;
+        for(let i=0;i<14;i++) particles.push(makeParticle(HAND_SLAM[0]-scroll,GROUND_Y-4,[226,200,160],260,true));
+      }
+    }
+
+    if(escEdge||pEdge) { state='paused'; }
+    else {
+      const target=Math.min(MAX_SPEED,BASE_SPEED+meters()*SPEED_PER_M);
+      curSpeed=Math.min(target,curSpeed+800*dt);
+      const dx=curSpeed*dt; scroll+=dx;
+
+      jumpBuf=Math.max(0,jumpBuf-dt);
+      coyote=onGround?COYOTE_TIME:Math.max(0,coyote-dt);
+      if(jumpPressed){ jumpBuf=JUMP_BUFFER_T; }
+      if(jumpBuf>0&&(onGround||coyote>0)){
+        vy=JUMP_V; h=Math.max(h,0.5); onGround=false; coyote=0; jumpBuf=0;
+      }
+      if(jumpReleased&&vy>420) vy*=0.45;
+      stepVertical(dt);
+      shieldT=Math.max(0,shieldT-dt);
+
+      spawnCursor-=dx;
+      while(spawnCursor<LW+400) spawnGroup();
+
+      const dr=dosaRect();
+      for(const o of [...obstacles]){
+        o.x-=dx;
+        if(o.x+o.w<-60){ obstacles.splice(obstacles.indexOf(o),1); continue; }
+        if(rectsOverlap(dr,{x:o.x+o.hitLocal.x,y:o.y+o.hitLocal.y,w:o.hitLocal.w,h:o.hitLocal.h})){
+          if(shieldT>0) smashObstacle(o); else { startDeath(); return; }
+        }
+      }
+      for(const c of [...chutneys]){
+        c.x-=dx;
+        c.y=c.baseY+Math.sin(runT*4+c.phase)*6;
+        if(c.x<-60){ chutneys.splice(chutneys.indexOf(c),1); continue; }
+        const pick={x:c.x-26,y:c.y-26,w:52,h:52};
+        const inflated={x:dr.x-8,y:dr.y-8,w:dr.w+16,h:dr.h+16};
+        if(rectsOverlap(inflated,pick)){ chutneys.splice(chutneys.indexOf(c),1); collectChutney(c); }
+      }
+    }
+  } else if(state==='paused'){
+    if(escEdge||pEdge) state='playing';
+    if(rEdge) startIntro();
+  } else if(state==='dying'){
+    deathT+=dt; stepVertical(dt);
+    if(deathT>=DEATH_END) state='over';
+  } else if(state==='over'){
+    if(jumpPressed||enterEdge||rEdge) startIntro();
+  }
+
+  jumpPressed=false; jumpReleased=false;
+  delete keys['_esc']; delete keys['_p']; delete keys['_r']; delete keys['_enter'];
+}
+
+// ── Draw ─────────────────────────────────────────────────────────────
+function drawWall(ctx) {
+  const x=-Math.floor((scroll*WALL_PARALLAX)%WALL_PERIOD);
+  ctx.drawImage(wallCanvas,x,0);
+  ctx.drawImage(wallCanvas,x+WALL_PERIOD,0);
+}
+
+function drawCounter(ctx) {
+  ctx.fillStyle='rgb(236,206,166)'; ctx.fillRect(0,COUNTER_BACK_Y,LW,COUNTER_FRONT_Y-COUNTER_BACK_Y);
+  ctx.fillStyle='rgb(214,182,142)'; ctx.fillRect(0,COUNTER_BACK_Y,LW,10);
+  let gx=-Math.floor(scroll%192);
+  ctx.strokeStyle='rgb(214,184,146)'; ctx.lineWidth=3;
+  while(gx<LW){ ctx.beginPath(); ctx.moveTo(gx,COUNTER_BACK_Y+10); ctx.lineTo(gx,COUNTER_FRONT_Y); ctx.stroke(); gx+=192; }
+  for(const [cx,cy,r] of crumbs){
+    ctx.fillStyle='rgb(200,165,120)';
+    ctx.beginPath(); ctx.arc(Math.floor((cx-scroll)%LW+LW)%LW,cy,r,0,Math.PI*2); ctx.fill();
+  }
+  ctx.fillStyle='rgb(178,112,70)'; ctx.fillRect(0,COUNTER_FRONT_Y,LW,18);
+  ctx.fillStyle='rgb(205,140,92)'; ctx.fillRect(0,COUNTER_FRONT_Y,LW,5);
+  ctx.fillStyle='rgb(140,86,52)'; ctx.fillRect(0,COUNTER_FRONT_Y+18,LW,LH-COUNTER_FRONT_Y-18);
+  let dx2=-Math.floor(scroll%320);
+  while(dx2<LW){
+    roundRect(ctx,'rgb(156,98,60)',dx2+18,COUNTER_FRONT_Y+36,284,62,10,'rgb(110,66,40)',4);
+    ctx.fillStyle='rgb(232,186,98)';
+    ctx.beginPath(); ctx.arc(dx2+160,COUNTER_FRONT_Y+67,8,0,Math.PI*2); ctx.fill();
+    dx2+=320;
+  }
+}
+
+function drawShadow(ctx, cx, ht) {
+  const s=clamp(1.0-ht/380,0.4,1.0);
+  const w=Math.round(130*s), sh2=20;
+  ctx.save(); ctx.globalAlpha=0.35*s;
+  ctx.fillStyle='rgb(90,60,30)';
+  ctx.beginPath(); ctx.ellipse(cx,GROUND_Y-6,w/2,sh2/2,0,0,Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+
+function drawShield(ctx, cx, cy) {
+  const r=Math.round(Math.max(dosaImg.width,dosaImg.height)*0.78+Math.sin(runT*8)*4);
+  ctx.save();
+  ctx.globalAlpha=0.27; ctx.fillStyle='rgb(120,255,150)';
+  ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.fill();
+  ctx.globalAlpha=0.78; ctx.strokeStyle='rgb(60,220,110)'; ctx.lineWidth=4;
+  ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.stroke();
+  ctx.restore();
+}
+
+function drawDosaImage(ctx, cx, cy, angle) {
+  ctx.save();
+  ctx.translate(cx,cy);
+  if(Math.abs(angle)>0.5) ctx.rotate(angle*Math.PI/180);
+  ctx.drawImage(dosaImg,-dosaImg.width/2,-dosaImg.height/2);
+  ctx.restore();
+}
+
+function drawActors(ctx) {
+  for(const o of obstacles) ctx.drawImage(o.canvas,Math.round(o.x),Math.round(o.y));
+  for(const c of chutneys){
+    ctx.save(); ctx.globalAlpha=0.27; ctx.fillStyle='rgb(170,255,150)';
+    ctx.beginPath(); ctx.arc(c.x,c.y,54,0,Math.PI*2); ctx.fill();
+    ctx.restore();
+    ctx.drawImage(chutneyImg,Math.round(c.x-chutneyImg.width/2),Math.round(c.y-chutneyImg.height/2));
+  }
+
+  const sh=dosaImg.height;
+  if(['menu','intro','playing','paused'].includes(state)){
+    let angle=0, bounce=0, xOff=0;
+    if(state==='menu'){ angle=Math.sin(runT*2.2)*2; bounce=Math.sin(runT*3)*2; }
+    else if(state==='intro'&&introT>=INTRO_SCARE_AT&&introT<INTRO_RUN_AT){ xOff=Math.sin(introT*70)*3; }
+    else if(h<=0.5){ bounce=-Math.abs(Math.sin(runT*11))*7; angle=Math.sin(runT*11)*4; }
+    else { angle=clamp(vy/90,-14,14); }
+    const cx=DOSA_X+xOff, cy=GROUND_Y-h-sh/2+bounce;
+    drawShadow(ctx,cx,h);
+    if(shieldT>0&&(shieldT>1.5||Math.floor(shieldT*10)%2===0)) drawShield(ctx,cx,cy);
+    drawDosaImage(ctx,cx,cy,angle);
+    // exclamation during scare
+    if(state==='intro'&&introT>=INTRO_SCARE_AT&&introT<INTRO_RUN_AT+0.1){
+      const bx=Math.round(cx+20), by=Math.round(cy-sh/2-34);
+      roundRect(ctx,'rgb(255,255,255)',bx-22,by-24,44,48,12,'rgb(60,40,30)',3);
+      drawText(ctx,'!',32,'rgb(220,50,40)',bx,by,'center',null);
+    }
+    // intro/play hand
+    if(introT<INTRO_END&&['intro','playing','paused'].includes(state)){
+      const pose=introHandPose(introT);
+      if(pose) {
+        const hx=pose[0]-(introT>=INTRO_RUN_AT?scroll:0);
+        drawHand(ctx,handFrames,hx,pose[1],pose[2],pose[3]);
+      }
+    }
+  } else if(state==='dying'){
+    const ty=GROUND_Y-h-sh*0.55;
+    const pose=deathHandPose(deathT,DOSA_X,ty);
+    if(pose&&deathT>=0.8){
+      drawHand(ctx,handFrames,pose[0],pose[1],pose[2],pose[3]);
+      drawDosaImage(ctx,pose[0],pose[1]-10,0);
+    } else {
+      drawShadow(ctx,DOSA_X,h);
+      drawDosaImage(ctx,DOSA_X,GROUND_Y-h-sh/2,Math.sin(deathT*40)*5);
+      if(pose) drawHand(ctx,handFrames,pose[0],pose[1],pose[2],pose[3]);
+    }
+  }
+}
+
+function drawParticles(ctx) {
+  for(const p of particles){
+    ctx.fillStyle=typeof p.color==='string'?p.color:`rgb(${p.color[0]},${p.color[1]},${p.color[2]})`;
+    ctx.beginPath(); ctx.arc(p.x,p.y,p.size,0,Math.PI*2); ctx.fill();
+  }
+  for(const f of floaters) drawText(ctx,f.text,26,`rgb(${f.color[0]},${f.color[1]},${f.color[2]})`,f.x,f.y);
+}
+
+function drawHUD(ctx) {
+  if(!['playing','paused','dying'].includes(state)) return;
+  drawPanel(ctx,18,16,360,108);
+  drawText(ctx,'SCORE '+(state==='dying'?finalScore:score()).toString().padStart(4,'0'),
+    28,[255,223,150],36,22,'topleft');
+  ctx.drawImage(chutneyIcon,36,72);
+  drawText(ctx,'x '+chutneyCount,22,[255,255,255],36+chutneyIcon.width+8,76,'topleft');
+  drawText(ctx,meters()+' m',22,[200,235,210],220,76,'topleft');
+  drawPanel(ctx,LW-250,16,232,56);
+  drawText(ctx,'BEST '+best.toString().padStart(4,'0'),22,[255,223,150],LW-134,44);
+  if(shieldT>0&&state!=='dying'){
+    drawPanel(ctx,18,134,360,44,[16,60,36]);
+    drawText(ctx,'IMMUNE',22,[170,255,180],34,140,'topleft');
+    ctx.fillStyle='rgb(20,40,28)'; ctx.beginPath(); ctx.roundRect(150,147,210,18,9); ctx.fill();
+    const fill=Math.round(210*shieldT/IMMUNITY_MAX);
+    if(fill>0){ ctx.fillStyle='rgb(90,230,120)'; ctx.beginPath(); ctx.roundRect(150,147,fill,18,9); ctx.fill(); }
+  }
+  if(state==='playing'&&playT<7)
+    drawText(ctx,'SPACE / UP / TAP = JUMP     CATCH CHUTNEY = IMMUNITY',18,[255,255,255],LW/2,672);
+}
+
+function drawOverlays(ctx) {
+  const blink=Math.floor(Date.now()/450)%2===0;
+  if(state==='menu'){
+    drawPanel(ctx,240,24,800,340,[20,28,26],0.67,18,[255,214,140]);
+    drawText(ctx,'DOSA DASH',92,[255,214,120],LW/2,105);
+    drawText(ctx,'THE GREAT KITCHEN ESCAPE',22,[245,245,225],LW/2,180);
+    drawText(ctx,'A hand is coming for your dosa — RUN!',22,[255,255,255],LW/2,232);
+    drawText(ctx,'SPACE / UP / TAP = jump      ESC = pause',18,[225,235,225],LW/2,274);
+    if(blink) drawText(ctx,'PRESS ENTER OR TAP TO START',34,[255,190,90],LW/2,328);
+  } else if(state==='paused'){
+    ctx.save(); ctx.globalAlpha=0.51; ctx.fillStyle='#000'; ctx.fillRect(0,0,LW,LH); ctx.restore();
+    drawText(ctx,'PAUSED',58,[255,255,255],LW/2,LH/2-30);
+    drawText(ctx,'ESC to resume   R to restart',26,[230,230,230],LW/2,LH/2+30);
+  } else if(state==='over'){
+    drawPanel(ctx,330,130,620,360,[20,28,26],0.67,18,[255,214,140]);
+    drawText(ctx,'THE HAND GOT YOU!',52,[255,214,120],LW/2,200);
+    drawText(ctx,'SCORE  '+finalScore.toString().padStart(4,'0'),34,[255,255,255],LW/2,282);
+    drawText(ctx,meters()+' m   |   '+chutneyCount+' chutney   |   '+smashed+' smashed',20,[210,235,215],LW/2,330);
+    drawText(ctx,newBest?'NEW BEST!':'BEST  '+best.toString().padStart(4,'0'),26,[255,230,130],LW/2,378);
+    if(blink) drawText(ctx,'TAP / R / ENTER = RUN AGAIN',26,[255,190,90],LW/2,438);
+  }
+}
+
+// ── Main loop ────────────────────────────────────────────────────────
+const offscreenCanvas = document.createElement('canvas');
+offscreenCanvas.width=LW; offscreenCanvas.height=LH;
+const oc = offscreenCanvas.getContext('2d');
+
+let lastTime=null;
+function frame(ts) {
+  if(!running){ return; }
+  if(lastTime===null) lastTime=ts;
+  const dt=Math.min((ts-lastTime)/1000, 0.05);
+  lastTime=ts;
+
+  update(dt);
+
+  oc.clearRect(0,0,LW,LH);
+  drawWall(oc);
+  drawCounter(oc);
+  drawActors(oc);
+  drawParticles(oc);
+  drawHUD(oc);
+  drawOverlays(oc);
+
+  // Shake offset
+  let ox=0, oy=0;
+  if(shakeT>0){ const m=Math.round(Math.min(shakeT,0.4)*30); ox=Math.round(rng(-m,m)); oy=Math.round(rng(-m,m)); }
+
+  ctx.save();
+  ctx.scale(scale,scale);
+  ctx.clearRect(-1,-1,LW+2,LH+2);
+  ctx.drawImage(offscreenCanvas,ox,oy);
+  ctx.restore();
+
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
